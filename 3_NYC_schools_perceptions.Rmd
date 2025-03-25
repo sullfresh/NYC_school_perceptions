@@ -1,0 +1,131 @@
+---
+title: "3_NYC_schools_perceptions"
+author: "Kara Sullivan"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## uploading NYC school performance data. 'combined' dataset located here: https://data.world/dataquest/nyc-schools-data/workspace/file?filename=combined.csv
+## gened & d75 datasets represent general education schools and special needs schools, respectively. those datasets located in zip file here: https://data.cityofnewyork.us/Education/2011-NYC-School-Survey/mnz3-dyi8
+
+## load the libraries I'm going to need
+library(purrr)
+library(ggplot2)
+library(readr)
+library(caTools)
+library(car)
+library(quantmod)
+library(corrplot)
+
+## load datasets
+combined <- read_csv("combined.csv")
+gened <- read_tsv("masterfile11_gened_final.txt")
+d75 <- read_tsv("masterfile11_d75_final.txt")
+
+## filter gened & d75 school datasets to high schools only and use only aggregate rating information vars
+library(dplyr)
+gened_filter <- gened %>%
+  filter(schooltype == "High School") %>%
+  select(dbn, schoolname, d75, rr_s:aca_tot_11) %>%
+  rename(DBN = dbn)
+  
+## rename dbn to DBN in d75 so it can be joined to combined data later  
+d75_filter <- d75 %>%
+  select(dbn, schoolname, d75, rr_s:aca_tot_11) %>%
+  rename(DBN = dbn)
+  
+## join gened_d75 to combined dataset by DBN
+gened_d75 <- bind_rows(gened_filter, d75_filter) %>%
+  inner_join(combined, by = "DBN")
+  
+## RESULTS: dataset with 374 obs. and some NA's throughout. Keeping in NAs for now.
+
+## create correlation matrix to explore relationships between data.
+gened_d75 %>% 
+  select(where(is.numeric)) %>%
+  cor(use = "pairwise.complete.obs")
+## RESULTS: some noticeable results in the matrix are...
+## (1) high pos. corr btwn AP Test takers & No. of students who replied to survey (AP Test Takers x N_s = 0.750168996)
+## (2) moderate neg. corr btwn teacher safety score & special ed percent (saf_t_11 x sped_percent = -0.35994905)
+
+## visualize these binary realtionships with simple scatterplots:
+## graph1: school special ed percent vs safety score from teachers
+gened_d75 %>%
+  ggplot(aes(x = sped_percent, y = saf_t_11)) + 
+  geom_point() +
+  geom_smooth()
+  
+## RESULTS: slight neg. corr displayed but lots of variance. linear until special ed hits 30%, relatiionship flips to positive
+## w/ outliers in upper right (i.e. the highest percentage special ed schools have high teacher safety scores). Not stochastic, so 
+## not great data to use for linear model.
+
+## graph2: no. AP test takers vs no. of students (N_s) who replied to the survey
+gened_d75 %>%
+  ggplot(aes(x = `AP Test Takers`, y = N_s)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE)
+  
+## RESULTS: pos. linear relationship as implied by corr matrix. added lm method option here since it was more appropriate after seeing first
+## look at data was linear/stochastic. smaller variance compared to special ed vs teacher safety, but variance looks heteroskedastic so 
+## maybe weighted OLS model is best.
+
+## Double-check heteroskedasticity of AP Test Takes vs No of student respondents (N_s) by plotting variance
+## First, create simple linear regression model of relationship
+lm_model <- lm(N_s ~ `AP Test Takers`, data = gened_d75)
+summary(lm_model) 
+
+## RESULTS: linear model has RSE = 565.7 . really large, indicating that the lm model is a poor fit to the true observations.
+## Coef of `AP Test Takers` = 2.6312, 15.43 t value (pretty high but unreliable given RSE)
+
+##creating residual vs. fitted plot
+plot(fitted(lm_model), resid(lm_model), xlab = 'Fitted Values', ylab = 'Residuals')
+
+## horizontal line added at 0
+abline(0,0)
+
+## RESULTS: plot shows that residuals are clustered toward the upper-left of the plot, further suggesting heteroskedasticity
+
+## Now, create Weighted Least Squares Regression, since simple Linear Model is not appropriate
+## Define weights -- creating reciprocal variance as the weights. This gives smaller variances will have greater weights. 
+wt <- 1 / lm(abs(lm_model$residuals) ~ lm_model$fitted.values)$fitted.values^2
+
+## Create the Weighted Least Squares model
+wls_model <- lm(N_s ~ `AP Test Takers`, data = gened_d75, , weights = wt)
+## RESULTS: getting an error indicating length of wt and AP Test Takers and/or N_s vectors not same length. Figure out what's up.
+
+print(gened_d75$`AP Test Takers`)
+print(gened_d75$N_s)
+## RESULTS: lots of NAs in `AP Test Takers` variable that's causing regression model error. Got to get rid of those.
+
+## Create dataset without NAs. Note this will likely slim down the sample size.
+gened_d75_nona <- na.omit(gened_d75)
+
+## RESULTS: new dataset has 111 obs compared to 374 obs in original. Much smaller sample.
+
+## Create new lm model with no NA's dataset
+lm_model_nona <- lm(N_s ~ `AP Test Takers`, data = gened_d75_nona)
+
+## Define weights -- creating reciprocal variance as the weights. This gives smaller variances will have greater weights. 
+wt <- 1 / lm(abs(lm_model_nona$residuals) ~ lm_model_nona$fitted.values)$fitted.values^2
+
+## Create the Weighted Least Squares model
+wls_model <- lm(N_s ~ `AP Test Takers`, data = gened_d75_nona, , weights = wt)
+summary(wls_model)
+## RESULTS: the WLS model has RSE = 1.124, a way better fit to the true values than the LM model's RSE of 565.7. 
+## Coef of AP Test Takers = 3.295, so every AP test taker predicts a 3.295 increase in student survey respondents (N_s).
+## T value = 9.777 on 1.09 Degrees of Freedom. z score ~ 1.984... 9.777 > 1.984; AP test takers has stat sig impact on N_s.
+
+
+
+## What else is a good predicter of No. of test takers (N_s)? Looking at correlation matrix, there's a pos. corr between
+## avg_class_size x N_s = 0.552223356. Would this be a good explanatory variable to add to a model along with 'AP test takers'?
+
+## For future, i would check for multicolinearity between avg_class_size and AP test takers using vif() function.
+
+
+
+
